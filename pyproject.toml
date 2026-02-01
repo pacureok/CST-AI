@@ -1,7 +1,18 @@
 [build-system]
-requires = ["setuptools>=64", "wheel", "setuptools_scm"]
+requires = ["setuptools>=64", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "CST-AI"
 version = "1.2.0"
+description = "Motor de IA Hibrido para TPU v5e (TENTPU & CAITPU)"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{name = "PCURE-AI+"}]
+dependencies = [
+    "torch",
+    "numpy",
+]
+
+[tool.setuptools]
+packages = ["MODELS", "src"]
