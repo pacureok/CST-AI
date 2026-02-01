@@ -1,11 +1,13 @@
+from . import core
 from . import extra
 import sys
 
-# Simulamos submódulos que PyTorch Inductor busca desesperadamente
+# Definimos los mocks para que sean accesibles como atributos
 class MathMock:
     pass
 
 math = MathMock()
 
-# Agregamos 'extra' como atributo del módulo para evitar el AttributeError
+# Inyectamos los módulos en el registro global de Python
+sys.modules['triton.language.core'] = core
 sys.modules['triton.language.extra'] = extra
