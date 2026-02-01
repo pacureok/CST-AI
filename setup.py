@@ -1,21 +1,18 @@
-# /home/oficialpacureok/Open-Sora/setup.py
-from setuptools import setup, find_packages
+from setuptools import setup, find_packages, Extension
+import os
+
+tpu_extension = Extension(
+    name="cst_tpu_core",
+    sources=["src/cst_core.cpp"],
+    libraries=[],
+    extra_compile_args=["-O3", "-std=c++17"],
+)
 
 setup(
-    name="cst_ai_tpu",
-    version="1.0.0",
+    name="CST-AI",
+    version="1.2.0",
     packages=find_packages(),
-    install_requires=[
-        "torch",
-        "librosa",
-        "soundfile",
-        "numpy",
-        "tqdm",
-    ],
-    # Eliminamos las referencias a NVIDIA CUDA para evitar conflictos en TPU
-    classifiers=[
-        "Programming Language :: Python :: 3",
-        "Environment :: Cloud Shell",
-        "Topic :: Scientific/Engineering :: Artificial Intelligence",
-    ],
+    ext_modules=[tpu_extension],
+    install_requires=["torch", "torch_xla", "mmengine", "einops"],
+    description="AI Engine for Google TPU (Python/C++)",
 )
