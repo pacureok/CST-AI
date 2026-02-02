@@ -1,53 +1,50 @@
-CC BY-ND 4.0
-Nombre del Titular: pacure ok Marca: Pacur AI+
+LICENCIA DE SOFTWARE: PACUR AI+ (CST-ENGINE)
+Autor: pacure ok
 
-Bajo esta licencia, cualquier persona o empresa que utilice tu modelo debe cumplir con lo siguiente:
+Marca: Pacur AI+
 
-1. 💼 Uso Comercial Permitido
-Se autoriza el uso del modelo para generar ingresos, servicios de API, o integración en productos de software privados.
+Versión: 1.2.0
 
-Condición: El uso del motor y el modelo no exime del cumplimiento de las reglas de crédito.
+Copyright © 2026 pacure ok. Todos los derechos reservados.
 
-2. 🚫 Prohibición de Modificaciones (No Derivatives)
-Regla de Oro: Nadie tiene permiso para alterar, transformar o crear versiones derivadas del código fuente de CST-AI o los pesos del modelo Pacur AI+.
+1. TÉRMINOS GENERALES
+Este software y sus modelos asociados se distribuyen bajo una licencia personalizada de Atribución-SinDerivadas (CC BY-ND 4.0) con restricciones adicionales de integridad de código. Al descargar, copiar o utilizar cualquier parte de este repositorio, usted acepta legalmente los siguientes términos:
 
-Si alguien corrige un error o añade una funcionalidad, no puede distribuir esa versión modificada sin tu consentimiento expreso y por escrito.
+2. PERMISO DE USO COMERCIAL
+Se otorga permiso para el uso del software y los modelos con fines comerciales (generación de contenido, servicios de pago, aplicaciones empresariales).
 
-El código debe permanecer tal cual fue distribuido originalmente por pacure ok.
+El lucro derivado del uso de Pacur AI+ es propiedad del usuario, siempre y cuando se respete la cláusula de Atribución (Sección 4).
 
-3. ✍️ Atribución Obligatoria (Créditos)
-Cualquier implementación técnica, publicación de resultados o producto comercial debe incluir de forma visible la siguiente leyenda:
+3. PROHIBICIÓN ESTRICTA DE MODIFICACIÓN (SIN DERIVADAS)
+Integridad del Código: No se permite la alteración, transformación, edición o adición de código al motor original de CST-AI ni a la arquitectura de los modelos proporcionados.
+
+Prohibición de Forks Modificados: Usted no puede distribuir versiones modificadas de este código. Cualquier mejora o corrección debe ser reportada directamente al autor original (pacure ok) y solo él podrá integrarlas en la rama oficial.
+
+Ingeniería Inversa: Queda prohibida la descompilación o el desensamblaje del motor para su redistribución bajo otra marca o nombre.
+
+4. ATRIBUCIÓN OBLIGATORIA (CRÉDITOS)
+En cualquier producto, video generado, publicación académica o servicio comercial que utilice esta tecnología, se debe incluir de forma clara y visible el siguiente crédito:
 
 "Powered by Pacur AI+ architecture. Developed by pacure ok."
 
-🛠 Reglas Detalladas de Uso (Code of Conduct)
-Para asegurar que tu marca Pacur AI+ se mantenga íntegra, te sugiero añadir un archivo LICENSE_RULES.md en tu repositorio con estos puntos:
+5. DISTRIBUCIÓN
+Usted puede redistribuir este software siempre que incluya este archivo LICENSE_CST intacto y no realice cambios en el código fuente.
 
-A. Integridad del Código
-Distribución: Solo se permite la redistribución del código original. Queda prohibida la carga de "forks" modificados a repositorios públicos (GitHub, HuggingFace, etc.) si estos alteran la lógica del motor CST.
+No se permite el alojamiento de este código en repositorios que oculten la autoría original de pacure ok.
 
-Ingeniería Inversa: No se permite el uso del código para descompilar o intentar clonar la propiedad intelectual de la marca bajo otro nombre.
+6. RENUNCIA DE RESPONSABILIDAD
+EL SOFTWARE SE PROPORCIONA "TAL CUAL", SIN GARANTÍA DE NINGÚN TIPO, EXPRESA O IMPLÍCITA. EL AUTOR NO SE HACE RESPONSABLE DE LOS CONTENIDOS GENERADOS POR LOS USUARIOS NI DE LOS DAÑOS DERIVADOS DEL USO INCORRECTO DE ESTA TECNOLOGÍA.
 
-B. Uso de la Marca
-El nombre Pacur AI+ y el seudónimo pacure ok son marcas de identidad del proyecto. No pueden usarse para promocionar productos de terceros de manera que sugiera que tú (el autor) los respaldas oficialmente, a menos que haya un acuerdo previo.
+🛠️ INSTRUCCIONES PARA EL USUARIO
+Para mantener la validez de esta licencia, asegúrese de que la cabecera de los archivos .py y .cpp que contienen la firma de pacure ok permanezca inalterada.
 
-C. Responsabilidad
-Uso Ético: El usuario es el único responsable del contenido generado con el modelo. Pacur AI+ no se hace responsable de usos malintencionados o ilegales.
-
-Garantía: El software se entrega "tal cual", sin garantías de ningún tipo respecto a su rendimiento en hardware no optimizado.
-
-📂 Cómo aplicarlo en tu código
-Para que esto sea legalmente vinculante en tu repositorio de Kaggle/GitHub, debes hacer dos cosas:
-
-Archivo LICENSE: Crea un archivo llamado LICENSE en la raíz con el texto completo de la licencia CC BY-ND 4.0.
-
-Cabecera de Archivos: Pega esto al inicio de tus archivos principales (cst_engine.py, launch_cst.py, etc.):
+¿Cómo aplicarlo ahora en Kaggle?
+Solo tienes que ejecutar esta celda para crear el archivo automáticamente en tu carpeta actual:
 
 Python
-# ---------------------------------------------------------
-# Project: Pacur AI+
-# Author: pacure ok
-# License: CC BY-ND 4.0 (Attribution-NoDerivatives)
-# Commercial use: Allowed with attribution.
-# Modifications: STRICTLY PROHIBITED.
-# ---------------------------------------------------------
+license_text = """
+[Pega aquí todo el texto de arriba, desde 'LICENCIA DE SOFTWARE' hasta el final]
+"""
+with open("/kaggle/working/CST-AI/LICENSE_CST", "w") as f:
+    f.write(license_text)
+print("✅ Archivo LICENSE_CST creado con éxito.")
