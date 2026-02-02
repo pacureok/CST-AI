@@ -5,12 +5,14 @@ import torch.nn as nn
 from colossalai.shardformer.policies.base_policy import ModulePolicyDescription, Policy, SubModuleReplacementDescription
 
 from opensora.models.vae.tensor_parallel import Conv3dTPCol, Conv3dTPRow, GroupNormTP
-
 from .distributed import ContextParallelAttention, TPUpDecoderBlockCausal3D, prepare_parallel_attention_mask
 from .vae import DecoderCausal3D, EncoderCausal3D
 
-
 def gen_resnets_replacements(prefix: str, with_shortcut: bool = False):
+    """
+    Genera automáticamente las descripciones de reemplazo para bloques ResNet
+    optimizados para Paralelismo de Tensores (TP).
+    """
     replacements = [
         SubModuleReplacementDescription(
             suffix=f"{prefix}.norm1",
@@ -19,9 +21,7 @@ def gen_resnets_replacements(prefix: str, with_shortcut: bool = False):
         SubModuleReplacementDescription(
             suffix=f"{prefix}.conv1.conv",
             target_module=Conv3dTPRow,
-            kwargs=dict(
-                split_output=True,
-            ),
+            kwargs=dict(split_output=True),
         ),
         SubModuleReplacementDescription(
             suffix=f"{prefix}.norm2",
@@ -30,9 +30,7 @@ def gen_resnets_replacements(prefix: str, with_shortcut: bool = False):
         SubModuleReplacementDescription(
             suffix=f"{prefix}.conv2.conv",
             target_module=Conv3dTPRow,
-            kwargs=dict(
-                split_output=True,
-            ),
+            kwargs=dict(split_output=True),
         ),
     ]
     if with_shortcut:
@@ -40,24 +38,29 @@ def gen_resnets_replacements(prefix: str, with_shortcut: bool = False):
             SubModuleReplacementDescription(
                 suffix=f"{prefix}.conv_shortcut.conv",
                 target_module=Conv3dTPRow,
-                kwargs=dict(
-                    split_output=True,
-                ),
+                kwargs=dict(split_output=True),
             )
         )
     return replacements
 
 
 class HunyuanVaePolicy(Policy):
+    """
+    Política de fragmentación para el VAE de Hunyuan.
+    Esencial para comprimir/descomprimir video de larga duración (CST Optimized).
+    """
     def config_sanity_check(self):
+        """Verifica que la configuración de shard sea compatible."""
         pass
 
     def preprocess(self):
+        """Pre-procesamiento del modelo antes de la fragmentación."""
         return self.model
 
     def module_policy(self) -> Dict[Union[str, nn.Module], ModulePolicyDescription]:
         policy = {}
 
+        # --- CONFIGURACIÓN DEL ENCODER (Compresión de Video) ---
         policy[EncoderCausal3D] = ModulePolicyDescription(
             sub_module_replacement=[
                 SubModuleReplacementDescription(
@@ -69,9 +72,7 @@ class HunyuanVaePolicy(Policy):
                 SubModuleReplacementDescription(
                     suffix="down_blocks[0].downsamplers[0].conv.conv",
                     target_module=Conv3dTPRow,
-                    kwargs=dict(
-                        split_output=True,
-                    ),
+                    kwargs=dict(split_output=True),
                 ),
                 *gen_resnets_replacements("down_blocks[1].resnets[0]", with_shortcut=True),
                 *gen_resnets_replacements("down_blocks[1].resnets[1]"),
@@ -85,13 +86,10 @@ class HunyuanVaePolicy(Policy):
                 ),
             ],
             attribute_replacement={
-                "down_blocks[0].downsamplers[0].channels": self.model.encoder.down_blocks[0].downsamplers[0].channels
-                // self.shard_config.tensor_parallel_size,
-                "down_blocks[1].downsamplers[0].channels": self.model.encoder.down_blocks[1].downsamplers[0].channels
-                // self.shard_config.tensor_parallel_size,
-                # "mid_block.attentions[0].processor": MemEfficientRingAttnProcessor(
-                #     self.shard_config.tensor_parallel_process_group
-                # ),
+                "down_blocks[0].downsamplers[0].channels": 
+                    self.model.encoder.down_blocks[0].downsamplers[0].channels // self.shard_config.tensor_parallel_size,
+                "down_blocks[1].downsamplers[0].channels": 
+                    self.model.encoder.down_blocks[1].downsamplers[0].channels // self.shard_config.tensor_parallel_size,
             },
             method_replacement={
                 "prepare_attention_mask": partial(
@@ -100,14 +98,13 @@ class HunyuanVaePolicy(Policy):
             },
         )
 
+        # --- CONFIGURACIÓN DEL DECODER (Reconstrucción Ultra-Realista) ---
         policy[DecoderCausal3D] = ModulePolicyDescription(
             sub_module_replacement=[
                 SubModuleReplacementDescription(
                     suffix="up_blocks[1].upsamplers[0]",
                     target_module=TPUpDecoderBlockCausal3D,
-                    kwargs=dict(
-                        split_output=True,
-                    ),
+                    kwargs=dict(split_output=True),
                 ),
                 *gen_resnets_replacements("up_blocks[2].resnets[0]", with_shortcut=True),
                 *gen_resnets_replacements("up_blocks[2].resnets[1]"),
@@ -115,9 +112,7 @@ class HunyuanVaePolicy(Policy):
                 SubModuleReplacementDescription(
                     suffix="up_blocks[2].upsamplers[0].conv.conv",
                     target_module=Conv3dTPRow,
-                    kwargs=dict(
-                        split_output=True,
-                    ),
+                    kwargs=dict(split_output=True),
                 ),
                 *gen_resnets_replacements("up_blocks[3].resnets[0]", with_shortcut=True),
                 *gen_resnets_replacements("up_blocks[3].resnets[1]"),
@@ -136,11 +131,8 @@ class HunyuanVaePolicy(Policy):
                 ),
             ],
             attribute_replacement={
-                "up_blocks[2].upsamplers[0].channels": self.model.decoder.up_blocks[2].upsamplers[0].channels
-                // self.shard_config.tensor_parallel_size,
-                # "mid_block.attentions[0].processor": MemEfficientRingAttnProcessor(
-                #     self.shard_config.tensor_parallel_process_group
-                # ),
+                "up_blocks[2].upsamplers[0].channels": 
+                    self.model.decoder.up_blocks[2].upsamplers[0].channels // self.shard_config.tensor_parallel_size,
             },
             method_replacement={
                 "prepare_attention_mask": partial(
@@ -152,4 +144,5 @@ class HunyuanVaePolicy(Policy):
         return policy
 
     def postprocess(self):
+        """Finaliza la integración del modelo fragmentado."""
         return self.model

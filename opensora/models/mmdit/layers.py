@@ -11,17 +11,18 @@ from einops import rearrange
 from liger_kernel.ops.rms_norm import LigerRMSNormFunction
 from torch import Tensor, nn
 
-# Importamos utilidades matemáticas, pero CST intentará usar NATIVAS cuando sea posible
+# Importamos utilidades matemáticas internas
 from .math import attention, liger_rope, rope
 
 # --- CST CONFIGURATION ---
-# Detectamos si estamos en TPU para activar optimizaciones XLA
 XLA_AVAILABLE = False
 try:
     import torch_xla.core.xla_model as xm
     XLA_AVAILABLE = True
 except ImportError:
     pass
+
+# --- EMBEDDING LAYERS ---
 
 class EmbedND(nn.Module):
     def __init__(self, dim: int, theta: int, axes_dim: list[int]):
@@ -32,7 +33,6 @@ class EmbedND(nn.Module):
 
     def forward(self, ids: Tensor) -> Tensor:
         n_axes = ids.shape[-1]
-        # CST Optimization: Evitamos listas intermedias si es posible, pero mantenemos compatibilidad
         emb = torch.cat(
             [rope(ids[..., i], self.axes_dim[i], self.theta) for i in range(n_axes)],
             dim=-3,
@@ -41,6 +41,7 @@ class EmbedND(nn.Module):
 
 
 class LigerEmbedND(nn.Module):
+    """Versión optimizada para memoria contigua en secuencias largas."""
     def __init__(self, dim: int, theta: int, axes_dim: list[int]):
         super().__init__()
         self.dim = dim
@@ -49,15 +50,14 @@ class LigerEmbedND(nn.Module):
 
     def forward(self, ids: Tensor) -> Tensor:
         n_axes = ids.shape[-1]
-        cos_list = []
-        sin_list = []
+        cos_list, sin_list = [], []
         for i in range(n_axes):
             cos, sin = liger_rope(ids[..., i], self.axes_dim[i], self.theta)
             cos_list.append(cos)
             sin_list.append(sin)
+        
         cos_emb = torch.cat(cos_list, dim=-1).repeat(1, 1, 2).contiguous()
         sin_emb = torch.cat(sin_list, dim=-1).repeat(1, 1, 2).contiguous()
-
         return (cos_emb, sin_emb)
 
 
@@ -66,63 +66,42 @@ def timestep_embedding(t: Tensor, dim, max_period=10000, time_factor: float = 10
     t = time_factor * t
     half = dim // 2
     freqs = torch.exp(-math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32) / half).to(t.device)
-
     args = t[:, None].float() * freqs[None]
     embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
     if dim % 2:
         embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
-    if torch.is_floating_point(t):
-        embedding = embedding.to(t)
-    return embedding
+    return embedding.to(t) if torch.is_floating_point(t) else embedding
 
 
 class MLPEmbedder(nn.Module):
     def __init__(self, in_dim: int, hidden_dim: int):
         super().__init__()
-        self.in_layer = nn.Linear(in_dim, hidden_dim, bias=True)
+        self.in_layer = nn.Linear(in_dim, hidden_dim)
         self.silu = nn.SiLU()
-        self.out_layer = nn.Linear(hidden_dim, hidden_dim, bias=True)
+        self.out_layer = nn.Linear(hidden_dim, hidden_dim)
 
     def forward(self, x: Tensor) -> Tensor:
         return self.out_layer(self.silu(self.in_layer(x)))
 
+# --- NORMALIZATION & ATTENTION ---
 
-class RMSNorm(torch.nn.Module):
+class FusedRMSNorm(nn.Module):
     def __init__(self, dim: int):
         super().__init__()
         self.scale = nn.Parameter(torch.ones(dim))
 
     def forward(self, x: Tensor):
-        x_dtype = x.dtype
-        x = x.float()
-        rrms = torch.rsqrt(torch.mean(x**2, dim=-1, keepdim=True) + 1e-6)
-        return (x * rrms).to(dtype=x_dtype) * self.scale
+        return LigerRMSNormFunction.apply(x, self.scale, 1e-6, 0.0, "llama", False)
 
 
-class FusedRMSNorm(RMSNorm):
-    def forward(self, x: Tensor):
-        # CST: Si estamos en TPU, a veces la función nativa es más rápida que Liger
-        # Pero mantenemos Liger por compatibilidad con los pesos originales
-        return LigerRMSNormFunction.apply(
-            x,
-            self.scale,
-            1e-6,
-            0.0,
-            "llama",
-            False,
-        )
-
-
-class QKNorm(torch.nn.Module):
+class QKNorm(nn.Module):
     def __init__(self, dim: int):
         super().__init__()
         self.query_norm = FusedRMSNorm(dim)
         self.key_norm = FusedRMSNorm(dim)
 
     def forward(self, q: Tensor, k: Tensor, v: Tensor) -> tuple[Tensor, Tensor]:
-        q = self.query_norm(q)
-        k = self.key_norm(k)
-        return q.to(v), k.to(v)
+        return self.query_norm(q).to(v), self.key_norm(k).to(v)
 
 
 class SelfAttention(nn.Module):
@@ -138,6 +117,7 @@ class SelfAttention(nn.Module):
             self.q_proj = nn.Linear(dim, dim, bias=qkv_bias)
             self.k_proj = nn.Linear(dim, dim, bias=qkv_bias)
             self.v_proj = nn.Linear(dim, dim, bias=qkv_bias)
+        
         self.norm = QKNorm(head_dim)
         self.proj = nn.Linear(dim, dim)
 
@@ -153,17 +133,11 @@ class SelfAttention(nn.Module):
         q, k = self.norm(q, k, v)
         
         if not self.fused_qkv:
-            q = rearrange(q, "B L H D -> B H L D")
-            k = rearrange(k, "B L H D -> B H L D")
-            v = rearrange(v, "B L H D -> B H L D")
+            q, k, v = [rearrange(t, "B L H D -> B H L D") for t in (q, k, v)]
         
-        # CST ENGINE: HYPER-ATTENTION
-        # Usamos la implementación nativa para que DPR pueda swappear memoria
-        x = attention(q, k, v, pe=pe)
-        
-        x = self.proj(x)
-        return x
+        return self.proj(attention(q, k, v, pe=pe))
 
+# --- MODULATION ---
 
 @dataclass
 class ModulationOut:
@@ -171,138 +145,59 @@ class ModulationOut:
     scale: Tensor
     gate: Tensor
 
-
 class Modulation(nn.Module):
     def __init__(self, dim: int, double: bool):
         super().__init__()
         self.is_double = double
         self.multiplier = 6 if double else 3
-        self.lin = nn.Linear(dim, self.multiplier * dim, bias=True)
+        self.lin = nn.Linear(dim, self.multiplier * dim)
 
     def forward(self, vec: Tensor) -> tuple[ModulationOut, ModulationOut | None]:
-        # CST: Aquí es donde el vector de audio (si lo hubiera en vec) influencia la modulación
-        out = self.lin(nn.functional.silu(vec))[:, None, :].chunk(self.multiplier, dim=-1)
-
+        out = self.lin(F.silu(vec))[:, None, :].chunk(self.multiplier, dim=-1)
         return (
             ModulationOut(*out[:3]),
             ModulationOut(*out[3:]) if self.is_double else None,
         )
 
+# --- BLOCKS PROCESSORS (CORE LOGIC) ---
 
 class DoubleStreamBlockProcessor:
     def __call__(self, attn: nn.Module, img: Tensor, txt: Tensor, vec: Tensor, pe: Tensor) -> tuple[Tensor, Tensor]:
-        # DPR CHECK: Data Preservation Reasoning
-        # Esta anotación ayuda al compilador a saber que estos tensores son críticos
-        
         img_mod1, img_mod2 = attn.img_mod(vec)
         txt_mod1, txt_mod2 = attn.txt_mod(vec)
 
-        # Prepare image
-        img_modulated = attn.img_norm1(img)
-        img_modulated = (1 + img_mod1.scale) * img_modulated + img_mod1.shift
-
+        # Process Image Stream
+        img_m = (1 + img_mod1.scale) * attn.img_norm1(img) + img_mod1.shift
         if attn.img_attn.fused_qkv:
-            img_qkv = attn.img_attn.qkv(img_modulated)
-            img_q, img_k, img_v = rearrange(img_qkv, "B L (K H D) -> K B H L D", K=3, H=attn.num_heads, D=attn.head_dim)
+            img_q, img_k, img_v = rearrange(attn.img_attn.qkv(img_m), "B L (K H D) -> K B H L D", K=3, H=attn.num_heads, D=attn.head_dim)
         else:
-            img_q = rearrange(attn.img_attn.q_proj(img_modulated), "B L (H D) -> B L H D", H=attn.num_heads)
-            img_k = rearrange(attn.img_attn.k_proj(img_modulated), "B L (H D) -> B L H D", H=attn.num_heads)
-            img_v = rearrange(attn.img_attn.v_proj(img_modulated), "B L (H D) -> B L H D", H=attn.num_heads)
-
+            img_q = rearrange(attn.img_attn.q_proj(img_m), "B L (H D) -> B L H D", H=attn.num_heads)
+            img_k = rearrange(attn.img_attn.k_proj(img_m), "B L (H D) -> B L H D", H=attn.num_heads)
+            img_v = rearrange(attn.img_attn.v_proj(img_m), "B L (H D) -> B L H D", H=attn.num_heads)
         img_q, img_k = attn.img_attn.norm(img_q, img_k, img_v)
-        if not attn.img_attn.fused_qkv:
-            img_q = rearrange(img_q, "B L H D -> B H L D")
-            img_k = rearrange(img_k, "B L H D -> B H L D")
-            img_v = rearrange(img_v, "B L H D -> B H L D")
 
-        # Prepare txt (Audio latents are mixed here!)
-        txt_modulated = attn.txt_norm1(txt)
-        txt_modulated = (1 + txt_mod1.scale) * txt_modulated + txt_mod1.shift
+        # Process Text/Audio Stream
+        txt_m = (1 + txt_mod1.scale) * attn.txt_norm1(txt) + txt_mod1.shift
         if attn.txt_attn.fused_qkv:
-            txt_qkv = attn.txt_attn.qkv(txt_modulated)
-            txt_q, txt_k, txt_v = rearrange(txt_qkv, "B L (K H D) -> K B H L D", K=3, H=attn.num_heads, D=attn.head_dim)
+            txt_q, txt_k, txt_v = rearrange(attn.txt_attn.qkv(txt_m), "B L (K H D) -> K B H L D", K=3, H=attn.num_heads, D=attn.head_dim)
         else:
-            txt_q = rearrange(attn.txt_attn.q_proj(txt_modulated), "B L (H D) -> B L H D", H=attn.num_heads)
-            txt_k = rearrange(attn.txt_attn.k_proj(txt_modulated), "B L (H D) -> B L H D", H=attn.num_heads)
-            txt_v = rearrange(attn.txt_attn.v_proj(txt_modulated), "B L (H D) -> B L H D", H=attn.num_heads)
-        
+            txt_q = rearrange(attn.txt_attn.q_proj(txt_m), "B L (H D) -> B L H D", H=attn.num_heads)
+            txt_k = rearrange(attn.txt_attn.k_proj(txt_m), "B L (H D) -> B L H D", H=attn.num_heads)
+            txt_v = rearrange(attn.txt_attn.v_proj(txt_m), "B L (H D) -> B L H D", H=attn.num_heads)
         txt_q, txt_k = attn.txt_attn.norm(txt_q, txt_k, txt_v)
-        if not attn.txt_attn.fused_qkv:
-            txt_q = rearrange(txt_q, "B L H D -> B H L D")
-            txt_k = rearrange(txt_k, "B L H D -> B H L D")
-            txt_v = rearrange(txt_v, "B L H D -> B H L D")
 
-        # Joint Attention (Video looks at Text/Audio and vice-versa)
-        q = torch.cat((txt_q, img_q), dim=2)
-        k = torch.cat((txt_k, img_k), dim=2)
-        v = torch.cat((txt_v, img_v), dim=2)
-
-        # CST: Critical bottleneck. 
-        # Si la memoria es baja, el sistema DPR debería dividir esta operación.
+        # Joint Attention
+        q, k, v = [torch.cat((t, i), dim=2) for t, i in [(txt_q, img_q), (txt_k, img_k), (txt_v, img_v)]]
         attn1 = attention(q, k, v, pe=pe)
         
-        txt_attn, img_attn = attn1[:, : txt_q.shape[2]], attn1[:, txt_q.shape[2] :]
+        t_len = txt_q.shape[2]
+        txt_attn, img_attn = attn1[:, :t_len], attn1[:, t_len:]
 
-        # Calc blocks
         img = img + img_mod1.gate * attn.img_attn.proj(img_attn)
         img = img + img_mod2.gate * attn.img_mlp((1 + img_mod2.scale) * attn.img_norm2(img) + img_mod2.shift)
-
         txt = txt + txt_mod1.gate * attn.txt_attn.proj(txt_attn)
         txt = txt + txt_mod2.gate * attn.txt_mlp((1 + txt_mod2.scale) * attn.txt_norm2(txt) + txt_mod2.shift)
-        
         return img, txt
-
-
-class DoubleStreamBlock(nn.Module):
-    def __init__(
-        self,
-        hidden_size: int,
-        num_heads: int,
-        mlp_ratio: float,
-        qkv_bias: bool = False,
-        fused_qkv: bool = True,
-    ):
-        super().__init__()
-        mlp_hidden_dim = int(hidden_size * mlp_ratio)
-        self.num_heads = num_heads
-        self.hidden_size = hidden_size
-        self.head_dim = hidden_size // num_heads
-
-        # image stream
-        self.img_mod = Modulation(hidden_size, double=True)
-        self.img_norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        self.img_attn = SelfAttention(dim=hidden_size, num_heads=num_heads, qkv_bias=qkv_bias, fused_qkv=fused_qkv)
-
-        self.img_norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        self.img_mlp = nn.Sequential(
-            nn.Linear(hidden_size, mlp_hidden_dim, bias=True),
-            nn.GELU(approximate="tanh"),
-            nn.Linear(mlp_hidden_dim, hidden_size, bias=True),
-        )
-
-        # text stream
-        self.txt_mod = Modulation(hidden_size, double=True)
-        self.txt_norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        self.txt_attn = SelfAttention(dim=hidden_size, num_heads=num_heads, qkv_bias=qkv_bias, fused_qkv=fused_qkv)
-
-        self.txt_norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        self.txt_mlp = nn.Sequential(
-            nn.Linear(hidden_size, mlp_hidden_dim, bias=True),
-            nn.GELU(approximate="tanh"),
-            nn.Linear(mlp_hidden_dim, hidden_size, bias=True),
-        )
-
-        processor = DoubleStreamBlockProcessor()
-        self.set_processor(processor)
-
-    def set_processor(self, processor) -> None:
-        self.processor = processor
-
-    def get_processor(self):
-        return self.processor
-
-    def forward(self, img: Tensor, txt: Tensor, vec: Tensor, pe: Tensor, **kwargs) -> tuple[Tensor, Tensor]:
-        return self.processor(self, img, txt, vec, pe)
 
 
 class SingleStreamBlockProcessor:
@@ -320,78 +215,71 @@ class SingleStreamBlockProcessor:
             v = rearrange(v, "B L (H D) -> B L H D", H=attn.num_heads)
 
         q, k = attn.norm(q, k, v)
-        if not attn.fused_qkv:
-            q = rearrange(q, "B L H D -> B H L D")
-            k = rearrange(k, "B L H D -> B H L D")
-            v = rearrange(v, "B L H D -> B H L D")
+        attn_res = attention(q, k, v, pe=pe)
+        return x + mod.gate * attn.linear2(torch.cat((attn_res, attn.mlp_act(mlp)), 2))
 
-        # CST: Joint Single Stream Attention
-        attn_1 = attention(q, k, v, pe=pe)
+# --- TRANSFORMER BLOCKS ---
 
-        output = attn.linear2(torch.cat((attn_1, attn.mlp_act(mlp)), 2))
-        output = x + mod.gate * output
-        return output
+class DoubleStreamBlock(nn.Module):
+    def __init__(self, hidden_size, num_heads, mlp_ratio, qkv_bias=False, fused_qkv=True):
+        super().__init__()
+        self.num_heads, self.hidden_size = num_heads, hidden_size
+        self.head_dim = hidden_size // num_heads
+        mlp_hidden = int(hidden_size * mlp_ratio)
+
+        self.img_mod = Modulation(hidden_size, double=True)
+        self.img_norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+        self.img_attn = SelfAttention(hidden_size, num_heads, qkv_bias, fused_qkv)
+        self.img_norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+        self.img_mlp = nn.Sequential(nn.Linear(hidden_size, mlp_hidden), nn.GELU(approximate="tanh"), nn.Linear(mlp_hidden, hidden_size))
+
+        self.txt_mod = Modulation(hidden_size, double=True)
+        self.txt_norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+        self.txt_attn = SelfAttention(hidden_size, num_heads, qkv_bias, fused_qkv)
+        self.txt_norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+        self.txt_mlp = nn.Sequential(nn.Linear(hidden_size, mlp_hidden), nn.GELU(approximate="tanh"), nn.Linear(mlp_hidden, hidden_size))
+
+        self.processor = DoubleStreamBlockProcessor()
+
+    def forward(self, img, txt, vec, pe, **kwargs):
+        return self.processor(self, img, txt, vec, pe)
 
 
 class SingleStreamBlock(nn.Module):
-    def __init__(
-        self,
-        hidden_size: int,
-        num_heads: int,
-        mlp_ratio: float = 4.0,
-        qk_scale: float | None = None,
-        fused_qkv: bool = True,
-    ):
+    def __init__(self, hidden_size, num_heads, mlp_ratio=4.0, qk_scale=None, fused_qkv=True):
         super().__init__()
-        self.hidden_dim = hidden_size
-        self.num_heads = num_heads
+        self.hidden_size, self.num_heads = hidden_size, num_heads
         self.head_dim = hidden_size // num_heads
-        self.scale = qk_scale or self.head_dim**-0.5
+        self.mlp_hidden_dim = int(hidden_size * mlp_ratio)
         self.fused_qkv = fused_qkv
 
-        self.mlp_hidden_dim = int(hidden_size * mlp_ratio)
         if fused_qkv:
             self.linear1 = nn.Linear(hidden_size, hidden_size * 3 + self.mlp_hidden_dim)
         else:
-            self.q_proj = nn.Linear(hidden_size, hidden_size)
-            self.k_proj = nn.Linear(hidden_size, hidden_size)
+            self.q_proj, self.k_proj = nn.Linear(hidden_size, hidden_size), nn.Linear(hidden_size, hidden_size)
             self.v_mlp = nn.Linear(hidden_size, hidden_size + self.mlp_hidden_dim)
 
         self.linear2 = nn.Linear(hidden_size + self.mlp_hidden_dim, hidden_size)
         self.norm = QKNorm(self.head_dim)
-        self.hidden_size = hidden_size
         self.pre_norm = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.mlp_act = nn.GELU(approximate="tanh")
         self.modulation = Modulation(hidden_size, double=False)
+        self.processor = SingleStreamBlockProcessor()
 
-        processor = SingleStreamBlockProcessor()
-        self.set_processor(processor)
-
-    def set_processor(self, processor) -> None:
-        self.processor = processor
-
-    def get_processor(self):
-        return self.processor
-
-    def forward(self, x: Tensor, vec: Tensor, pe: Tensor, **kwargs) -> Tensor:
+    def forward(self, x, vec, pe, **kwargs):
         return self.processor(self, x, vec, pe)
 
+# --- FINAL LAYER & ENHANCER ---
 
 class LastLayer(nn.Module):
-    def __init__(self, hidden_size: int, patch_size: int, out_channels: int):
+    def __init__(self, hidden_size, patch_size, out_channels):
         super().__init__()
         self.norm_final = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        self.linear = nn.Linear(hidden_size, patch_size * patch_size * out_channels, bias=True)
-        self.adaLN_modulation = nn.Sequential(nn.SiLU(), nn.Linear(hidden_size, 2 * hidden_size, bias=True))
+        self.linear = nn.Linear(hidden_size, patch_size * patch_size * out_channels)
+        self.adaLN_modulation = nn.Sequential(nn.SiLU(), nn.Linear(hidden_size, 2 * hidden_size))
 
     def forward(self, x: Tensor, vec: Tensor) -> Tensor:
         shift, scale = self.adaLN_modulation(vec).chunk(2, dim=1)
         x = (1 + scale[:, None, :]) * self.norm_final(x) + shift[:, None, :]
         x = self.linear(x)
-        
-        # --- CST ULTRA-REALISM ENHANCER (B) ---
-        # Un pequeño boost en la señal final ayuda a definir texturas
-        # Esto actúa como un "filtro de paso alto" muy sutil.
-        x = x * 1.05 
-        
-        return x
+        return x * 1.05  # CST Ultra-Realism Boost

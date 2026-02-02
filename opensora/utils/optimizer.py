@@ -9,20 +9,19 @@ def create_optimizer(
     optimizer_config: dict,
 ) -> torch.optim.Optimizer:
     """
-    Create an optimizer.
-
-    Args:
-        model (torch.nn.Module): The model to be optimized.
-        optimizer_config (dict): The configuration of the optimizer.
-
-    Returns:
-        torch.optim.Optimizer: The optimizer.
+    Crea un optimizador para el modelo.
+    Utiliza HybridAdam por defecto, que es altamente eficiente en TPUs/GPUs
+    al combinar operaciones en CPU y acelerador.
     """
+    optimizer_config = optimizer_config.copy()
     optimizer_name = optimizer_config.pop("cls", "HybridAdam")
+    
     if optimizer_name == "HybridAdam":
         optimizer_cls = HybridAdam
     else:
         raise ValueError(f"Unknown optimizer: {optimizer_name}")
+    
+    # Solo optimizamos los parámetros que requieren gradiente
     optimizer = optimizer_cls(
         filter(lambda p: p.requires_grad, model.parameters()),
         **optimizer_config,
@@ -39,41 +38,34 @@ def create_lr_scheduler(
     initial_lr: float = 1e-6,
 ) -> _LRScheduler | None:
     """
-    Create a learning rate scheduler.
-
-    Args:
-        optimizer (torch.optim.Optimizer): The optimizer to be used.
-        num_steps_per_epoch (int): The number of steps per epoch.
-        epochs (int): The number of epochs.
-        warmup_steps (int |  None): The number of warmup steps.
-        use_cosine_scheduler (bool): Whether to use cosine scheduler.
-
-    Returns:
-        _LRScheduler |  None: The learning rate scheduler
+    Crea un planificador de tasa de aprendizaje (Learning Rate).
+    Soporta calentamiento lineal (Warmup) y decaimiento de coseno.
     """
     if warmup_steps is None and not use_cosine_scheduler:
         lr_scheduler = None
     elif use_cosine_scheduler:
+        # Decaimiento de coseno: suave y efectivo para modelos grandes
         lr_scheduler = CosineAnnealingWarmupLR(
             optimizer,
             total_steps=num_steps_per_epoch * epochs,
             warmup_steps=warmup_steps,
         )
     else:
-        lr_scheduler = LinearWarmupLR(optimizer, initial_lr=1e-6, warmup_steps=warmup_steps)
-        # lr_scheduler = LinearWarmupLR(optimizer, warmup_steps=warmup_steps)
+        # Calentamiento lineal por defecto
+        lr_scheduler = LinearWarmupLR(
+            optimizer, 
+            initial_lr=initial_lr, 
+            warmup_steps=warmup_steps
+        )
 
     return lr_scheduler
 
 
 class LinearWarmupLR(_LRScheduler):
-    """Linearly warmup learning rate and then linearly decay.
-
-    Args:
-        optimizer (:class:`torch.optim.Optimizer`): Wrapped optimizer.
-        warmup_steps (int, optional): Number of warmup steps, defaults to 0
-        last_step (int, optional): The index of last step, defaults to -1. When last_step=-1,
-            the schedule is started from the beginning or When last_step=-1, sets initial lr as lr.
+    """
+    Implementación de calentamiento lineal de la tasa de aprendizaje.
+    Sube gradualmente el LR desde un valor inicial bajo hasta el objetivo
+    durante los primeros 'warmup_steps'.
     """
 
     def __init__(self, optimizer, initial_lr=0, warmup_steps: int = 0, last_epoch: int = -1):
@@ -83,9 +75,11 @@ class LinearWarmupLR(_LRScheduler):
 
     def get_lr(self):
         if self.last_epoch < self.warmup_steps:
+            # Incremento progresivo por paso
             return [
                 self.initial_lr + (self.last_epoch + 1) / (self.warmup_steps + 1) * (lr - self.initial_lr)
                 for lr in self.base_lrs
             ]
         else:
+            # Una vez terminado el warmup, mantenemos el LR base
             return self.base_lrs

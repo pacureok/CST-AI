@@ -1,11 +1,16 @@
+# ======================================================
+# PCURE-AI+ T2I2V Configuration (FLUX + Open-Sora)
+# ======================================================
+
 use_t2i2v = True
 
-# flux configurations
+# 1. FLUX Model Configuration (Generador de Imagen Base)
 img_flux = dict(
     type="flux",
     from_pretrained="./ckpts/flux1-dev.safetensors",
-    guidance_embed=True,
-    # model architecture
+    guidance_embed=True, # Habilita el control preciso del prompt
+    
+    # Arquitectura FLUX: Optimizada para realismo y seguimiento de instrucciones
     in_channels=64,
     vec_in_dim=768,
     context_in_dim=4096,
@@ -17,9 +22,10 @@ img_flux = dict(
     axes_dim=[16, 56, 56],
     theta=10_000,
     qkv_bias=True,
-    cond_embed=False,  # pass i2v & v2v info, for t2v need this layer too but with x_cond and mask all set to 0
+    cond_embed=False, # En T2I2V, la imagen generada actúa como el condicionamiento
 )
 
+# 2. FLUX Autoencoder (Para decodificar la imagen latente de FLUX)
 img_flux_ae = dict(
     type="autoencoder_2d",
     from_pretrained="./ckpts/flux1-dev-ae.safetensors",
@@ -33,4 +39,6 @@ img_flux_ae = dict(
     scale_factor=0.3611,
     shift_factor=0.1159,
 )
+
+# Resolución de salida para la imagen que alimentará al motor de video
 img_resolution = "768px"
